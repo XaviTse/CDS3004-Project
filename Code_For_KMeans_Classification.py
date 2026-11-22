@@ -21,8 +21,8 @@ from sklearn.model_selection import StratifiedKFold, cross_validate, train_test_
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeClassifier, export_text
 
-project_dir = Path(r"C:\Users\Isaac\OneDrive\Desktop\CDS3004_Project")
-csv_path = project_dir / "hour.csv" if (project_dir / "hour.csv").exists() else Path("hour.csv")
+project_dir = Path(__file__).resolve().parent
+csv_path = project_dir / "hour.csv"
 hour_df = pd.read_csv(csv_path)
 
 morning = hour_df[(hour_df["hr"].isin([7, 8])) & (hour_df["workingday"] == 1)].copy()
@@ -294,3 +294,127 @@ importances = pd.Series(rf_model.feature_importances_, index=feature_cols).sort_
 )
 print("\n=== Random Forest Feature Importances ===")
 print(importances.round(4))
+
+# Historical profiles support planning; rental counts are not fleet inventory.
+output_dir = project_dir / "allocation_outputs"
+output_dir.mkdir(exist_ok=True)
+clust_summary.to_csv(output_dir / "cluster_demand_profiles.csv", encoding="utf-8-sig")
+
+time_weather = morning.groupby(["hr", "weathersit"]).agg(
+    sample_count=("cnt", "size"),
+    mean_rentals=("cnt", "mean"),
+    p90_rentals=("cnt", lambda s: s.quantile(0.90)),
+    surge_rate_pct=("surge", lambda s: s.mean() * 100),
+)
+time_weather.to_csv(output_dir / "time_weather_demand.csv", encoding="utf-8-sig")
+
+# Use only held-out rows for this model-output example, not training predictions.
+# The Random Forest is an example model, not automatically the best model.
+allocation_signals = morning.loc[
+    X_test.index,
+    ["dteday", "hr", "weathersit", "temp", "hum", "windspeed", "cnt", "surge"],
+].copy()
+allocation_signals = allocation_signals.rename(
+    columns={"cnt": "actual_rentals", "surge": "actual_surge"}
+)
+allocation_signals["predicted_surge_probability"] = rf_model.predict_proba(X_test)[:, 1]
+# 0.5 is an illustrative decision threshold; tune against operating costs later.
+allocation_signals["planning_action"] = np.where(
+    allocation_signals["predicted_surge_probability"] >= 0.5,
+    "Prioritize availability checks and prepare redistribution staff",
+    "Routine availability checks",
+)
+allocation_signals.sort_values(["dteday", "hr"]).to_csv(
+    output_dir / "holdout_allocation_signals.csv", index=False, encoding="utf-8-sig"
+)
+print("\n=== Allocation Planning: Historical Demand by Hour and Weather ===")
+print(time_weather.round(2))
+print(f"\nPlanning CSV files saved to: {output_dir}")
+print("Scope: working days, 07:00-09:00 only. Rental counts are not required bike inventory.")
+print("Risk signals use a random holdout, not a future-period backtest; validate chronologically before operational use.")
+print("Station inventory, returns and capacity are required to calculate redistribution quantities.")
+
+
+def save_planning_chart(fig, filename, note):
+    """Keep planning charts beside their CSV source tables."""
+    fig.text(0.02, 0.02, note, fontsize=9, color="#475569")
+    fig.tight_layout(rect=(0, 0.08, 1, 0.95))
+    fig.savefig(output_dir / filename, dpi=200, bbox_inches="tight")
+    plt.show()
+    plt.close(fig)
+
+
+# Historical demand: compare the same weather category at 07:00 and 08:00.
+weather_codes = sorted(morning["weathersit"].unique())
+
+weather_names = {
+    1: "Clear / Partly Cloudy",
+    2: "Mist / Cloudy",
+    3: "Light Rain / Snow",
+    4: "Severe Weather",
+}
+weather_labels = [weather_names[code] for code in weather_codes]
+fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
+fig.suptitle("When should availability checks take priority?", fontsize=15, fontweight="bold")
+x_positions = np.arange(len(weather_codes))
+for hour, offset, color in [(7, -0.19, "#2563eb"), (8, 0.19, "#f59e0b")]:
+    stats = time_weather.xs(hour, level="hr").reindex(weather_codes)
+    for ax, column in zip(axes, ["mean_rentals", "surge_rate_pct"]):
+        bars = ax.bar(x_positions + offset, stats[column], width=0.36,
+                      label=f"{hour:02d}:00", color=color)
+        ax.bar_label(bars, fmt="%.1f", padding=4, fontsize=9)
+    for position, mean, n in zip(x_positions + offset, stats["mean_rentals"], stats["sample_count"]):
+        axes[0].text(position, mean / 2, f"n={int(n)}", ha="center", color="white", fontsize=9)
+axes[0].set_title("Historical mean hourly rentals")
+axes[0].set_ylabel("Rentals per hour (not bike inventory)")
+axes[1].set_title("Historical share above the surge threshold")
+axes[1].set_ylabel("Surge hours (%)")
+axes[1].set_ylim(0, 100)
+for ax in axes:
+    ax.set_xticks(x_positions, weather_labels)
+    ax.margins(y=0.18)
+    ax.grid(axis="y", alpha=0.2)
+    ax.set_axisbelow(True)
+    ax.legend()
+save_planning_chart(fig, "graph4_time_weather_demand.png",
+                    "Working days, 07:00-09:00 | Historical associations; n = observed hours.")
+
+# Cluster numbers are labels, ordered here by observed surge frequency.
+fig, ax = plt.subplots(figsize=(9, 5.5))
+cluster_labels = [f"Cluster {cluster}\nn={int(row['count'])}; mean hour={row['mean_hr']:.1f}"
+                  for cluster, row in clust_summary.iterrows()]
+bars = ax.bar(cluster_labels, clust_summary["surge_rate_pct"], color="#0f766e", width=0.6)
+ax.bar_label(bars, fmt="%.1f%%", padding=5)
+ax.set_ylim(0, 100)
+ax.set_ylabel("Observed surge hours (%)")
+ax.set_title("K-Means groups: observed demand risk", fontsize=14, fontweight="bold")
+ax.grid(axis="y", alpha=0.2)
+ax.set_axisbelow(True)
+save_planning_chart(fig, "graph5_cluster_demand_risk.png",
+                    "Historical working mornings | Cluster IDs have no inherent ranking; these are observed rates, not predictions.")
+
+# Show how model signals compare with observations on the same held-out rows.
+risk_summary = allocation_signals.groupby(["hr", "weathersit"]).agg(
+    sample_count=("actual_surge", "size"),
+    mean_probability=("predicted_surge_probability", "mean"),
+    observed_rate=("actual_surge", "mean"),
+)
+fig, ax = plt.subplots(figsize=(11, 5.5))
+positions = np.arange(len(risk_summary))
+for offset, column, label, color in [
+    (-0.19, "mean_probability", "Mean predicted surge probability", "#7c3aed"),
+    (0.19, "observed_rate", "Observed surge share", "#94a3b8"),
+]:
+    bars = ax.bar(positions + offset, risk_summary[column] * 100, width=0.36,
+                  label=label, color=color)
+    ax.bar_label(bars, fmt="%.1f", padding=4, fontsize=9)
+ax.set_xticks(positions, [f"{hour:02d}:00 / weather {weather}\nn={int(row['sample_count'])}"
+                         for (hour, weather), row in risk_summary.iterrows()])
+ax.set_ylim(0, 100)
+ax.set_ylabel("Probability / observed share (%)")
+ax.set_title("Random Forest: held-out risk signals by time and weather", fontsize=14, fontweight="bold")
+ax.legend(loc="upper right")
+ax.grid(axis="y", alpha=0.2)
+ax.set_axisbelow(True)
+save_planning_chart(fig, "graph6_model_allocation_risk.png",
+                    "Random holdout, not a future forecast | Small groups are uncertain. Risk indicates planning priority, not bike quantities.")

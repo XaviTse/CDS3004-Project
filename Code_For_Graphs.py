@@ -6,11 +6,11 @@ from sklearn.preprocessing import StandardScaler
 
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-project_dir = Path(r"C:\Users\Isaac\OneDrive\Desktop\CDS3004_Project")
+project_dir = Path(__file__).resolve().parent
+# Filter the morning hours
 hour_df = pd.read_csv(project_dir / "hour.csv")
 morning = hour_df[(hour_df["hr"].isin([7, 8])) & (hour_df["workingday"] == 1)].copy()
-
+# Mark the surge hours
 q75 = morning["cnt"].quantile(0.75)
 morning["surge"] = (morning["cnt"] > q75).astype(int)
 
