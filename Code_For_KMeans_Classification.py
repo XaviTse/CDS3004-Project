@@ -344,41 +344,6 @@ def save_planning_chart(fig, filename, note):
     plt.close(fig)
 
 
-# Historical demand: compare the same weather category at 07:00 and 08:00.
-weather_codes = sorted(morning["weathersit"].unique())
-
-weather_names = {
-    1: "Clear / Partly Cloudy",
-    2: "Mist / Cloudy",
-    3: "Light Rain / Snow",
-    4: "Severe Weather",
-}
-weather_labels = [weather_names[code] for code in weather_codes]
-fig, axes = plt.subplots(1, 2, figsize=(12, 5.5))
-fig.suptitle("When should availability checks take priority?", fontsize=15, fontweight="bold")
-x_positions = np.arange(len(weather_codes))
-for hour, offset, color in [(7, -0.19, "#2563eb"), (8, 0.19, "#f59e0b")]:
-    stats = time_weather.xs(hour, level="hr").reindex(weather_codes)
-    for ax, column in zip(axes, ["mean_rentals", "surge_rate_pct"]):
-        bars = ax.bar(x_positions + offset, stats[column], width=0.36,
-                      label=f"{hour:02d}:00", color=color)
-        ax.bar_label(bars, fmt="%.1f", padding=4, fontsize=9)
-    for position, mean, n in zip(x_positions + offset, stats["mean_rentals"], stats["sample_count"]):
-        axes[0].text(position, mean / 2, f"n={int(n)}", ha="center", color="white", fontsize=9)
-axes[0].set_title("Historical mean hourly rentals")
-axes[0].set_ylabel("Rentals per hour (not bike inventory)")
-axes[1].set_title("Historical share above the surge threshold")
-axes[1].set_ylabel("Surge hours (%)")
-axes[1].set_ylim(0, 100)
-for ax in axes:
-    ax.set_xticks(x_positions, weather_labels)
-    ax.margins(y=0.18)
-    ax.grid(axis="y", alpha=0.2)
-    ax.set_axisbelow(True)
-    ax.legend()
-save_planning_chart(fig, "graph4_time_weather_demand.png",
-                    "Working days, 07:00-09:00 | Historical associations; n = observed hours.")
-
 # Cluster numbers are labels, ordered here by observed surge frequency.
 fig, ax = plt.subplots(figsize=(9, 5.5))
 cluster_labels = [f"Cluster {cluster}\nn={int(row['count'])}; mean hour={row['mean_hr']:.1f}"
